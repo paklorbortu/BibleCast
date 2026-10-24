@@ -40,6 +40,8 @@ def test_transcription_forces_english(monkeypatch, tmp_path: Path):
         str(audio),
         language="en",
         beam_size=5,
+        temperature=0.0,
+        condition_on_previous_text=False,
         vad_filter=False,
     )
 

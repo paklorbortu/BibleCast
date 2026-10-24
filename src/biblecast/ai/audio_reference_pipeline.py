@@ -1,8 +1,10 @@
 
-"""Coordinate audio transcription and local Bible passage matching."""
+"""Coordinate local audio transcription and Bible passage matching."""
 
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
 
 from biblecast.ai.passage_candidates import (
     PassageCandidate,
@@ -16,7 +18,7 @@ from biblecast.ai.whisper_transcriber import (
 
 @dataclass(frozen=True)
 class AudioReferenceResult:
-    """Internal result of processing audio into passage candidates."""
+    """Internal transcription and passage candidate result."""
 
     success: bool
     transcription: TranscriptionResult | None = None
@@ -25,11 +27,7 @@ class AudioReferenceResult:
 
 
 class AudioReferencePipeline:
-    """Transcribe audio and find local Bible passage candidates.
-
-    This pipeline suggests passages only. It never previews or projects
-    a passage and never approves a candidate on the operator's behalf.
-    """
+    """Transcribe locally and suggest passages for operator review."""
 
     def __init__(
         self,
@@ -43,10 +41,39 @@ class AudioReferencePipeline:
         translation_code: str,
         limit: int = 5,
     ) -> AudioReferenceResult:
-        """Transcribe audio and return ranked passage candidates."""
-
+        """Process an existing audio file."""
         transcription = self.transcriber.transcribe(audio_path)
+        return self._match_transcription(
+            transcription,
+            translation_code,
+            limit,
+        )
 
+    def process_audio(
+        self,
+        audio: np.ndarray,
+        translation_code: str,
+        sample_rate: int = 16_000,
+        limit: int = 5,
+    ) -> AudioReferenceResult:
+        """Process microphone samples directly from memory."""
+        transcription = self.transcriber.transcribe_audio(
+            audio,
+            sample_rate=sample_rate,
+        )
+        return self._match_transcription(
+            transcription,
+            translation_code,
+            limit,
+        )
+
+    @staticmethod
+    def _match_transcription(
+        transcription: TranscriptionResult,
+        translation_code: str,
+        limit: int,
+    ) -> AudioReferenceResult:
+        """Turn a successful transcription into candidate passages."""
         if not transcription.success:
             return AudioReferenceResult(
                 success=False,
