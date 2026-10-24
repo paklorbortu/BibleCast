@@ -1,3 +1,4 @@
+from huggingface_hub.inference._generated.types import zero_shot_image_classification
 import re
 import sys
 
@@ -25,6 +26,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QListWidget,
     QListWidgetItem,
+    QScrollArea,
+    QFrame,
 )
 from biblecast.bible.database import (
     get_all_verses,
@@ -120,7 +123,7 @@ class BibleCastWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BibleCast")
-        self.setMinimumSize(780, 620)
+        self.setMinimumSize(640, 480)
 
         # Preview and live output remain independent.
         self.preview_projector = ProjectorWindow(
@@ -330,6 +333,13 @@ class BibleCastWindow(QMainWindow):
         layout.addWidget(QLabel("Scripture reference"))
         layout.addWidget(self.reference)
         layout.addWidget(search_button)
+        
+        # Live microphone controls
+        listening_buttons = QHBoxLayout()
+        listening_buttons.addWidget(self.start_listening_button)
+        listening_buttons.addWidget(self.stop_listening_button)
+        layout.addLayout(listening_buttons)
+
         layout.addWidget(audio_button)
         layout.addWidget(QLabel("Suggested passages"))
         layout.addWidget(self.candidate_list)
@@ -352,9 +362,22 @@ class BibleCastWindow(QMainWindow):
         layout.addWidget(self.status)
         layout.addStretch()
 
+        # Keep the full interface accessible at smaller window sizes.
         container = QWidget()
         container.setLayout(layout)
-        self.setCentralWidget(container)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll_area.setWidget(container)
+
+        self.setCentralWidget(scroll_area)
 
     def load_translations(self):
         """Populate the dropdown with installed Bible translations."""
@@ -1096,7 +1119,7 @@ class BibleCastWindow(QMainWindow):
         session = self.live_audio_session
         if session is not None and session.translation_code != translation_code:
             return
-            
+
         if not translation_code:
             return
 
