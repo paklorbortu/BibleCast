@@ -2,8 +2,14 @@ import re
 import sys
 
 from PySide6.QtGui import QShortcut, QKeySequence
+from biblecast.ai.audio_reference_pipeline import AudioReferencePipeline
 from biblecast.bible.navigation import find_verse_index
-from PySide6.QtCore import Qt, QStringListModel
+from PySide6.QtCore import (
+    Qt, 
+    QStringListModel,
+    QThread,
+    Signal,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCompleter,
@@ -15,6 +21,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QFileDialog,
+    QListWidget,
+    QListWidgetItem,
 )
 from biblecast.bible.database import (
     get_all_verses,
@@ -27,6 +36,27 @@ from biblecast.bible.database import (
 )
 from biblecast.bible.reference_resolver import resolve_reference
 
+
+class CandidateSearchThread(QThread):
+    """Find Bible passage candidates without blocking the UI."""
+
+    result_ready = Signal(object, str)
+
+    def __init__(self, audio_path, translation_code, parent=None):
+        super().__init__(parent)
+        self.audio_path = audio_path
+        self.translation_code = translation_code
+
+    def run(self):
+        try:
+            pipeline = AudioReferencePipeline()
+            result = pipeline.process(
+                self.audio_path,
+                self.translation_code,
+            )
+            self.result_ready.emit(result, "")
+        except Exception as exc:
+            self.result_ready.emit(None, str(exc))
 
 class ProjectorWindow(QMainWindow):
     """Window for displaying one Bible verse at a time."""
@@ -104,6 +134,8 @@ class BibleCastWindow(QMainWindow):
         self.passage_verses = []
         self.passage_index = 0
         self.is_live = False
+        self.candidate_thread = None
+        self.audio_candidates = []
 
         # Track the autocomplete stage and selected book.
         self.suggestion_stage = "book"
@@ -198,7 +230,42 @@ class BibleCastWindow(QMainWindow):
         live_button = QPushButton("Go Live")
         clear_button = QPushButton("Clear Projector")
 
-        
+        audio_button = QPushButton("Find Passages from Audio")
+        self.candidate_list = QListWidget()
+        self.candidate_list.setMinimumHeight(140)
+        self.candidate_list.setStyleSheet(
+            """
+            QListWidget {
+                background-color: #111827;
+                color: #F9FAFB;
+                border: 1px solid #374151;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #374151;
+            }
+            QListWidget::item:selected {
+                background-color: #374151;
+                color: white;
+            }
+            """
+        )
+        self.candidate_list.setToolTip(
+            "Suggested Bible passages. Select one to review it."
+        )
+
+        use_candidate_button = QPushButton("Use Selected Candidate")
+        use_candidate_button.setEnabled(False)
+
+        audio_button.clicked.connect(self.find_candidates_from_audio)
+        self.candidate_list.currentRowChanged.connect(
+            lambda row: use_candidate_button.setEnabled(row >= 0)
+        )
+        use_candidate_button.clicked.connect(self.use_selected_candidate)
+
+        self.use_candidate_button = use_candidate_button
 
         search_button.clicked.connect(self.find_verse)
         previous_button.clicked.connect(self.previous_verse)
@@ -249,6 +316,10 @@ class BibleCastWindow(QMainWindow):
         layout.addWidget(QLabel("Scripture reference"))
         layout.addWidget(self.reference)
         layout.addWidget(search_button)
+        layout.addWidget(audio_button)
+        layout.addWidget(QLabel("Suggested passages"))
+        layout.addWidget(self.candidate_list)
+        layout.addWidget(use_candidate_button)
 
         navigation_buttons = QHBoxLayout()
         navigation_buttons.addWidget(previous_button)
@@ -462,6 +533,133 @@ class BibleCastWindow(QMainWindow):
         else:
             self.suggestion_stage = "complete"
             self.hide_suggestions()
+
+
+
+    def find_candidates_from_audio(self):
+        """Choose an audio file and search for local Bible passages."""
+        if (
+            self.candidate_thread is not None
+            and self.candidate_thread.isRunning()
+        ):
+            self.status.setText("Audio analysis is already running.")
+            return
+
+        translation_code = self.translation.currentData()
+        if not translation_code:
+            self.status.setText(
+                "Install a Bible translation before searching."
+            )
+            return
+
+        audio_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose sermon audio",
+            "",
+            "Audio files (*.wav *.mp3 *.m4a *.flac *.ogg);;All files (*)",
+        )
+        if not audio_path:
+            return
+
+        self.candidate_list.clear()
+        self.audio_candidates = []
+        self.use_candidate_button.setEnabled(False)
+        self.status.setText(
+            "Analyzing audio and searching the installed Bible..."
+        )
+
+        thread = CandidateSearchThread(
+            audio_path,
+            translation_code,
+            self,
+        )
+        self.candidate_thread = thread
+        thread.result_ready.connect(self.on_candidate_search_result)
+        thread.finished.connect(self.on_candidate_search_finished)
+        thread.start()
+
+    def on_candidate_search_result(self, result, error):
+        """Display candidate references and verse text, never the transcript."""
+        if error:
+            self.status.setText(f"Audio analysis failed: {error}")
+            return
+
+        if result is None:
+            self.status.setText("Audio analysis failed.")
+            return
+
+        if not result.success:
+            self.status.setText(result.error or "No candidates found.")
+            return
+
+        self.audio_candidates = list(result.candidates)
+        self.candidate_list.clear()
+
+        for candidate in self.audio_candidates:
+            label = (
+                f"{candidate.reference}  |  "
+                f"{candidate.match_type} match  |  "
+                f"{candidate.score:.0%}\n"
+                f"{candidate.text}"
+            )
+            item = QListWidgetItem(label)
+            self.candidate_list.addItem(item)
+
+        self.status.setText(
+            f"Found {len(self.audio_candidates)} candidate passage(s). "
+            "Select one to review it."
+        )
+
+    def on_candidate_search_finished(self):
+        """Allow another search after the worker has stopped."""
+        self.candidate_thread = None
+
+    def use_selected_candidate(self):
+        """Load a chosen candidate into the normal preview selection."""
+        row = self.candidate_list.currentRow()
+
+        if row < 0 or row >= len(self.audio_candidates):
+            self.status.setText("Select a candidate first.")
+            return
+
+        translation_code = self.translation.currentData()
+        candidate = self.audio_candidates[row]
+
+        resolved = resolve_reference(
+            translation_code,
+            candidate.reference,
+        )
+        if resolved is None:
+            self.status.setText(
+                "That candidate could not be resolved in the selected "
+                "translation. Try searching again."
+            )
+            return
+
+        all_verses = get_all_verses(translation_code)
+        first_verse = resolved["first_verse"]
+
+        index = find_verse_index(
+            all_verses,
+            first_verse["book_name"],
+            first_verse["chapter"],
+            first_verse["verse"],
+        )
+        if index is None:
+            self.status.setText(
+                "Could not locate the selected candidate in the Bible."
+            )
+            return
+
+        self.reference.setText(candidate.reference)
+        self.passage_verses = all_verses
+        self.passage_index = index
+        self.update_selected_verse()
+
+        self.status.setText(
+            f"Selected {self.selected_reference} for review. "
+            "It is not live. Use Preview or Go Live when ready."
+        )
 
 
     
