@@ -1,4 +1,5 @@
 
+from _pytest import pytester_assertions
 import threading
 import time
 
@@ -122,8 +123,7 @@ def test_queue_overflow_requests_shutdown(monkeypatch):
     assert any("fell behind" in message for message in errors)
 
     pipeline.release.set()
-    wait_for_event(stopped)
-    assert not session.is_active
+    wait_for_shutdown(session)
 
 
 def test_stop_drains_already_queued_segments(monkeypatch):
@@ -142,10 +142,9 @@ def test_stop_drains_already_queued_segments(monkeypatch):
 
     # Release inference after stop was requested.
     pipeline.release.set()
-    wait_for_event(stopped)
+    wait_for_shutdown(session)
 
     assert pipeline.calls == 3
-    assert not session.is_active
 
 
 def test_stop_is_idempotent(monkeypatch):
@@ -158,5 +157,13 @@ def test_stop_is_idempotent(monkeypatch):
     session.stop()
     session.stop()
 
-    wait_for_event(stopped)
-    assert not session.is_active
+    wait_for_shutdown(session)
+
+def wait_for_shutdown(session, timeout=3.0):
+    controller = session._stop_controller
+    assert controller is not None, "Shutdown controller was not started."
+
+    controller.join(timeout=timeout)
+
+    assert not controller.is_alive(), "Shutdown controller timed out."
+    assert not session.is_active, "Session is still active after shutdown."
