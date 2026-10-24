@@ -1,6 +1,7 @@
 import re
 import sys
 
+from biblecast.ai.live_audio_session import LiveAudioSession
 from PySide6.QtGui import QShortcut, QKeySequence
 from biblecast.ai.audio_reference_pipeline import AudioReferencePipeline
 from biblecast.bible.navigation import find_verse_index
@@ -136,6 +137,8 @@ class BibleCastWindow(QMainWindow):
         self.is_live = False
         self.candidate_thread = None
         self.audio_candidates = []
+        self.live_audio_session = None
+        self._candidate_by_reference = {}
 
         # Track the autocomplete stage and selected book.
         self.suggestion_stage = "book"
@@ -233,6 +236,16 @@ class BibleCastWindow(QMainWindow):
         audio_button = QPushButton("Find Passages from Audio")
         self.candidate_list = QListWidget()
         self.candidate_list.setMinimumHeight(140)
+        self.start_listening_button = QPushButton("Start Listening")
+        self.stop_listening_button = QPushButton("Stop Listening")
+        self.stop_listening_button.setEnabled(False)
+
+        self.start_listening_button.clicked.connect(self.start_listening)
+        self.stop_listening_button.clicked.connect(self.stop_listening)
+
+        layout.addWidget(self.start_listening_button)
+        layout.addWidget(self.stop_listening_button)
+
         self.candidate_list.setStyleSheet(
             """
             QListWidget {
@@ -942,6 +955,149 @@ class BibleCastWindow(QMainWindow):
             """
         )
         self.status.setText("Live projector cleared.")
+    
+
+    def start_listening(self):
+        """Start offline microphone listening for candidate passages."""
+        if (
+            self.live_audio_session is not None
+            and self.live_audio_session.is_listening
+        ):
+            return
+
+        translation_code = self.translation.currentData()
+        if not translation_code:
+            self.status.setText(
+                "Install a Bible translation before listening."
+            )
+            return
+
+        session = LiveAudioSession(
+            translation_code=translation_code,
+            parent=self,
+        )
+        session.result_ready.connect(self.on_live_audio_result)
+        session.error_occurred.connect(self.on_live_audio_error)
+        session.listening_changed.connect(self.on_listening_changed)
+
+        self.live_audio_session = session
+
+        try:
+            session.start()
+        except Exception as exc:
+            self.live_audio_session = None
+            self.status.setText(
+                f"Could not start microphone: {type(exc).__name__}: {exc}"
+            )
+
+
+    def stop_listening(self):
+        """Request a clean stop without blocking the UI on inference."""
+        session = self.live_audio_session
+        if session is None:
+            return
+
+        session.stop()
+        self.status.setText(
+            "Listening stopped. Finishing any queued audio analysis..."
+        )
+        self.stop_listening_button.setEnabled(False)
+
+        # Wait for the inference worker away from the GUI thread.
+        from threading import Thread
+
+        def wait_for_worker():
+            finished = session.wait_until_stopped(timeout=60.0)
+            if finished:
+                self._session_stopped(session)
+            else:
+                session.error_occurred.emit(
+                    "Audio analysis is still finishing. Please wait before "
+                    "starting another listening session."
+                )
+
+        Thread(
+            target=wait_for_worker,
+            name="BibleCastAudioShutdown",
+            daemon=True,
+        ).start()
+
+
+    def _session_stopped(self, session):
+        """Clear a completed session using a queued Qt invocation."""
+        from PySide6.QtCore import QTimer
+
+        def finish_on_ui_thread():
+            if self.live_audio_session is session:
+                self.live_audio_session = None
+                self.start_listening_button.setEnabled(True)
+                self.stop_listening_button.setEnabled(False)
+                self.status.setText("Listening stopped.")
+
+        QTimer.singleShot(0, finish_on_ui_thread)
+
+
+    def on_listening_changed(self, listening):
+        """Reflect microphone state in the controls."""
+        self.start_listening_button.setEnabled(not listening)
+        self.stop_listening_button.setEnabled(listening)
+        self.status.setText(
+            "Listening for Bible references. Detected passages will "
+            "appear as candidates for review."
+            if listening
+            else "Listening stopped."
+        )
+
+
+    def on_live_audio_error(self, message):
+        """Show audio errors without exposing the transcript."""
+        self.status.setText(message)
+
+
+    def on_live_audio_result(self, result):
+        """Merge new candidates without duplicating overlapping segments."""
+        if result is None or not result.success:
+            return
+
+        translation_code = self.translation.currentData()
+        if not translation_code:
+            return
+
+        for candidate in result.candidates:
+            key = (
+                translation_code.casefold(),
+                candidate.reference.casefold(),
+            )
+            previous = self._candidate_by_reference.get(key)
+
+            # Overlapping segments often rediscover the same verse. Keep one
+            # row and replace it only if the new match has a higher score.
+            if previous is not None and previous.score >= candidate.score:
+                continue
+
+            self._candidate_by_reference[key] = candidate
+
+        self.audio_candidates = list(self._candidate_by_reference.values())
+        self.candidate_list.clear()
+
+        for candidate in sorted(
+            self.audio_candidates,
+            key=lambda item: item.score,
+            reverse=True,
+        ):
+            label = (
+                f"{candidate.reference}  |  "
+                f"{candidate.match_type} match  |  "
+                f"{candidate.score:.0%}\n"
+                f"{candidate.text}"
+            )
+            self.candidate_list.addItem(QListWidgetItem(label))
+
+        self.status.setText(
+            f"{len(self.audio_candidates)} candidate passage(s) available. "
+            "Select a candidate to review it. Nothing has been cast live."
+        )
+
 
 
 def main():
