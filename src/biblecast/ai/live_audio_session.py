@@ -106,7 +106,6 @@ class LiveAudioSession(QObject):
             if not self._started or self._stop_controller_started:
                 return
 
-            self._accepting = False
             self._stop_controller_started = True
 
         self._stop_controller = Thread(
@@ -131,6 +130,10 @@ class LiveAudioSession(QObject):
                 capture.stop(timeout=1.0)
 
         # Capture has ended, so no more segments can enter the queue.
+        # Stop accepting segments, then drain the inference queue.
+        with self._state_lock:
+            self._accepting = False
+
         self._stop_event.set()
 
         worker = self._inference_thread
