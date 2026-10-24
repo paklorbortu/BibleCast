@@ -9,3 +9,9 @@ dist/
 .env.*
 !.env.example
 data/biblecast.db
+
+# Local Gemma audio test artifacts
+gemma_audio_test.wav
+gemma_audio_test2.wav
+gemma_audio_debug.txt
+gemma_audio_result.txt
