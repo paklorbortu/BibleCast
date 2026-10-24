@@ -1,16 +1,12 @@
 
-"""Coordinate transcription, Bible reference interpretation, and validation."""
+"""Coordinate audio transcription and local Bible passage matching."""
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from biblecast.ai.gemma_text import (
-    BibleReferenceResult,
-    GemmaTextAdapter,
-)
-from biblecast.ai.reference_validator import (
-    ValidatedReference,
-    validate_reference,
+from biblecast.ai.passage_candidates import (
+    PassageCandidate,
+    find_passage_candidates,
 )
 from biblecast.ai.whisper_transcriber import (
     TranscriptionResult,
@@ -20,32 +16,34 @@ from biblecast.ai.whisper_transcriber import (
 
 @dataclass(frozen=True)
 class AudioReferenceResult:
-    """Result of processing one audio recording."""
+    """Internal result of processing audio into passage candidates."""
 
     success: bool
     transcription: TranscriptionResult | None = None
-    reference: BibleReferenceResult | None = None
-    validated_reference: ValidatedReference | None = None
+    candidates: tuple[PassageCandidate, ...] = ()
     error: str = ""
 
 
 class AudioReferencePipeline:
-    """Run the offline audio-to-validated-reference workflow."""
+    """Transcribe audio and find local Bible passage candidates.
+
+    This pipeline suggests passages only. It never previews or projects
+    a passage and never approves a candidate on the operator's behalf.
+    """
 
     def __init__(
         self,
         transcriber: WhisperTranscriber | None = None,
-        interpreter: GemmaTextAdapter | None = None,
     ) -> None:
         self.transcriber = transcriber or WhisperTranscriber()
-        self.interpreter = interpreter or GemmaTextAdapter()
 
     def process(
         self,
         audio_path: str | Path,
         translation_code: str,
+        limit: int = 5,
     ) -> AudioReferenceResult:
-        """Process audio and validate the interpreted reference."""
+        """Transcribe audio and return ranked passage candidates."""
 
         transcription = self.transcriber.transcribe(audio_path)
 
@@ -64,30 +62,21 @@ class AudioReferencePipeline:
                 error="No speech was recognized.",
             )
 
-        reference = self.interpreter.interpret(transcript)
+        candidates = find_passage_candidates(
+            translation_code,
+            transcript,
+            limit=limit,
+        )
 
-        if not reference.success:
+        if not candidates:
             return AudioReferenceResult(
                 success=False,
                 transcription=transcription,
-                reference=reference,
-                error=reference.error or "Bible reference interpretation failed.",
-            )
-
-        validated = validate_reference(translation_code, reference)
-
-        if not validated.success:
-            return AudioReferenceResult(
-                success=False,
-                transcription=transcription,
-                reference=reference,
-                validated_reference=validated,
-                error=validated.error or "Bible reference validation failed.",
+                error="No matching Bible passages were found.",
             )
 
         return AudioReferenceResult(
             success=True,
             transcription=transcription,
-            reference=reference,
-            validated_reference=validated,
+            candidates=tuple(candidates),
         )

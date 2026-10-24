@@ -3,8 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from biblecast.ai.audio_reference_pipeline import AudioReferencePipeline
-from biblecast.ai.gemma_text import BibleReferenceResult
-from biblecast.ai.reference_validator import ValidatedReference
+from biblecast.ai.passage_candidates import PassageCandidate
 from biblecast.ai.whisper_transcriber import TranscriptionResult
 
 
@@ -18,77 +17,53 @@ class FakeTranscriber:
         return self.result
 
 
-class FakeInterpreter:
-    def __init__(self, result):
-        self.result = result
-        self.transcript = None
-
-    def interpret(self, transcript):
-        self.transcript = transcript
-        return self.result
-
-
-def make_pipeline(transcription, interpretation):
+def make_pipeline(transcription):
     transcriber = FakeTranscriber(transcription)
-    interpreter = FakeInterpreter(interpretation)
-
-    pipeline = AudioReferencePipeline(
-        transcriber=transcriber,
-        interpreter=interpreter,
-    )
-
-    return pipeline, transcriber, interpreter
+    return AudioReferencePipeline(transcriber=transcriber), transcriber
 
 
-def test_successfully_processes_and_validates_reference():
+def sample_candidates():
+    return [
+        PassageCandidate(
+            reference="Joshua 1:9",
+            text="Be strong and courageous.",
+            score=1.0,
+            match_type="quote",
+        ),
+        PassageCandidate(
+            reference="Deuteronomy 31:6",
+            text="Be strong and courageous. Do not fear.",
+            score=1.0,
+            match_type="quote",
+        ),
+    ]
+
+
+def test_returns_ranked_candidates_from_transcription():
     transcription = TranscriptionResult(
         success=True,
-        text="Please open John three sixteen.",
+        text="Be strong and courageous.",
         language="en",
     )
-    interpretation = BibleReferenceResult(
-        success=True,
-        book="John",
-        chapter="3",
-        verse="16",
-        confidence="high",
-    )
-    validated = ValidatedReference(
-        success=True,
-        book="John",
-        chapter=3,
-        start_verse=16,
-        end_verse=16,
-        verses=(
-            {
-                "book_name": "John",
-                "chapter": 3,
-                "verse": 16,
-                "text": "For God so loved the world...",
-            },
-        ),
-    )
-
-    pipeline, transcriber, interpreter = make_pipeline(
-        transcription,
-        interpretation,
-    )
+    pipeline, transcriber = make_pipeline(transcription)
+    candidates = sample_candidates()
 
     with patch(
-        "biblecast.ai.audio_reference_pipeline.validate_reference",
-        return_value=validated,
-    ) as validate:
-        result = pipeline.process("sermon.wav", "WEB")
+        "biblecast.ai.audio_reference_pipeline.find_passage_candidates",
+        return_value=candidates,
+    ) as find_candidates:
+        result = pipeline.process("sermon.wav", "WEB", limit=2)
 
     assert result.success is True
     assert result.transcription == transcription
-    assert result.reference == interpretation
-    assert result.validated_reference == validated
+    assert result.candidates == tuple(candidates)
     assert result.error == ""
-
     assert transcriber.audio_path == "sermon.wav"
-    assert interpreter.transcript == "Please open John three sixteen."
-    validate.assert_called_once_with("WEB", interpretation)
+    find_candidates.assert_called_once_with(
+        "WEB",
+        "Be strong and courageous.",
+        limit=2,
+    )
 
 
 def test_returns_error_when_transcription_fails():
@@ -96,23 +71,17 @@ def test_returns_error_when_transcription_fails():
         success=False,
         error="Audio file could not be decoded.",
     )
-    pipeline, _, interpreter = make_pipeline(
-        transcription,
-        BibleReferenceResult(success=False),
-    )
+    pipeline, _ = make_pipeline(transcription)
 
     with patch(
-        "biblecast.ai.audio_reference_pipeline.validate_reference"
-    ) as validate:
+        "biblecast.ai.audio_reference_pipeline.find_passage_candidates"
+    ) as find_candidates:
         result = pipeline.process(Path("sermon.wav"), "WEB")
 
     assert result.success is False
     assert result.error == "Audio file could not be decoded."
-    assert result.transcription == transcription
-    assert result.reference is None
-    assert result.validated_reference is None
-    interpreter.transcript is None
-    validate.assert_not_called()
+    assert result.candidates == ()
+    find_candidates.assert_not_called()
 
 
 def test_rejects_empty_transcription():
@@ -121,93 +90,73 @@ def test_rejects_empty_transcription():
         text="   ",
         language="en",
     )
-    pipeline, _, interpreter = make_pipeline(
-        transcription,
-        BibleReferenceResult(success=False),
-    )
+    pipeline, _ = make_pipeline(transcription)
 
     with patch(
-        "biblecast.ai.audio_reference_pipeline.validate_reference"
-    ) as validate:
+        "biblecast.ai.audio_reference_pipeline.find_passage_candidates"
+    ) as find_candidates:
         result = pipeline.process("sermon.wav", "WEB")
 
     assert result.success is False
     assert result.error == "No speech was recognized."
-    assert result.reference is None
-    assert interpreter.transcript is None
-    validate.assert_not_called()
+    assert result.candidates == ()
+    find_candidates.assert_not_called()
 
 
-def test_returns_error_when_interpretation_fails():
+def test_returns_error_when_no_candidates_are_found():
     transcription = TranscriptionResult(
         success=True,
-        text="Some unclear speech.",
+        text="Unrelated speech.",
         language="en",
     )
-    interpretation = BibleReferenceResult(
-        success=False,
-        error="Gemma inference timed out.",
-    )
-    pipeline, _, interpreter = make_pipeline(
-        transcription,
-        interpretation,
-    )
+    pipeline, _ = make_pipeline(transcription)
 
     with patch(
-        "biblecast.ai.audio_reference_pipeline.validate_reference"
-    ) as validate:
-        result = pipeline.process("sermon.wav", "WEB")
-
-    assert result.success is False
-    assert result.reference == interpretation
-    assert result.validated_reference is None
-    assert result.error == "Gemma inference timed out."
-    assert interpreter.transcript == "Some unclear speech."
-    validate.assert_not_called()
-
-
-def test_returns_error_when_reference_validation_fails():
-    transcription = TranscriptionResult(
-        success=True,
-        text="Open John three sixteen.",
-        language="en",
-    )
-    interpretation = BibleReferenceResult(
-        success=True,
-        book="John",
-        chapter="3",
-        verse="16",
-        confidence="high",
-    )
-    invalid_reference = ValidatedReference(
-        success=False,
-        error="The reference does not exist.",
-    )
-    pipeline, _, _ = make_pipeline(transcription, interpretation)
-
-    with patch(
-        "biblecast.ai.audio_reference_pipeline.validate_reference",
-        return_value=invalid_reference,
+        "biblecast.ai.audio_reference_pipeline.find_passage_candidates",
+        return_value=[],
     ):
         result = pipeline.process("sermon.wav", "WEB")
 
     assert result.success is False
-    assert result.reference == interpretation
-    assert result.validated_reference == invalid_reference
-    assert result.error == "The reference does not exist."
+    assert result.error == "No matching Bible passages were found."
+    assert result.candidates == ()
 
 
-def test_uses_fallback_error_messages_when_errors_are_empty():
+def test_uses_fallback_error_when_transcription_error_is_empty():
     transcription = TranscriptionResult(
         success=False,
         error="",
     )
-    pipeline, _, _ = make_pipeline(
-        transcription,
-        BibleReferenceResult(success=False),
-    )
+    pipeline, _ = make_pipeline(transcription)
 
     result = pipeline.process("sermon.wav", "WEB")
 
     assert result.success is False
     assert result.error == "Audio transcription failed."
+
+
+def test_pipeline_only_suggests_candidates():
+    transcription = TranscriptionResult(
+        success=True,
+        text="Open John three sixteen.",
+        language="en",
+    )
+    pipeline, _ = make_pipeline(transcription)
+
+    with patch(
+        "biblecast.ai.audio_reference_pipeline.find_passage_candidates",
+        return_value=[
+            PassageCandidate(
+                reference="John 3:16",
+                text="For God so loved the world...",
+                score=1.0,
+                match_type="explicit",
+            )
+        ],
+    ):
+        result = pipeline.process("sermon.wav", "WEB")
+
+    assert result.success is True
+    assert result.candidates[0].reference == "John 3:16"
+    assert not hasattr(result, "go_live")
+    assert not hasattr(result, "approved")
