@@ -1,6 +1,8 @@
 import re
 import sys
 
+from PySide6.QtGui import QShortcut, QKeySequence
+from biblecast.bible.navigation import find_verse_index
 from PySide6.QtCore import Qt, QStringListModel
 from PySide6.QtWidgets import (
     QApplication,
@@ -14,8 +16,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from biblecast.bible.database import (
+    get_all_verses,
     get_book_verses,
     get_verse_range,
     list_books,
@@ -101,6 +103,7 @@ class BibleCastWindow(QMainWindow):
         self.selected_text = ""
         self.passage_verses = []
         self.passage_index = 0
+        self.is_live = False
 
         # Track the autocomplete stage and selected book.
         self.suggestion_stage = "book"
@@ -115,6 +118,20 @@ class BibleCastWindow(QMainWindow):
             "Search, select and project Bible passages."
         )
 
+        self.mode_indicator = QLabel("● READY")
+        self.mode_indicator.setAlignment(
+            Qt.AlignmentFlag.AlignLeft
+        )
+        self.mode_indicator.setStyleSheet(
+            """
+            color: #64748B;
+            background-color: #F1F5F9;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 8px 12px;
+            border-radius: 6px;
+            """
+        )
         self.translation = QComboBox()
         self.load_translations()
         self.translation.currentIndexChanged.connect(
@@ -175,14 +192,47 @@ class BibleCastWindow(QMainWindow):
         self.status.setWordWrap(True)
 
         search_button = QPushButton("Find Verse")
+        previous_button = QPushButton("◀ Previous Verse")
+        next_button = QPushButton("Next Verse ▶")
         preview_button = QPushButton("Preview")
         live_button = QPushButton("Go Live")
         clear_button = QPushButton("Clear Projector")
 
+        
+
         search_button.clicked.connect(self.find_verse)
+        previous_button.clicked.connect(self.previous_verse)
+        next_button.clicked.connect(self.next_verse)
         preview_button.clicked.connect(self.preview_verse)
         live_button.clicked.connect(self.go_live)
         clear_button.clicked.connect(self.clear_projector)
+
+        # Keyboard shortcuts for live presentation control.
+        self.next_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Right),
+            self,
+        )
+        self.next_shortcut.activated.connect(self.next_verse)
+
+        self.previous_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Left),
+            self,
+        )
+        self.previous_shortcut.activated.connect(self.previous_verse)
+
+        self.go_live_shortcut = QShortcut(
+            QKeySequence("Ctrl+Return"),
+            self,
+        )
+        self.go_live_shortcut.activated.connect(self.go_live)
+
+        self.clear_projector_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Escape),
+            self,
+        )
+        self.clear_projector_shortcut.activated.connect(
+            self.clear_projector
+        )
 
         layout = QVBoxLayout()
         layout.setContentsMargins(28, 28, 28, 28)
@@ -190,6 +240,7 @@ class BibleCastWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addWidget(subtitle)
+        layout.addWidget(self.mode_indicator)
         layout.addSpacing(12)
 
         layout.addWidget(QLabel("Bible translation"))
@@ -198,6 +249,11 @@ class BibleCastWindow(QMainWindow):
         layout.addWidget(QLabel("Scripture reference"))
         layout.addWidget(self.reference)
         layout.addWidget(search_button)
+
+        navigation_buttons = QHBoxLayout()
+        navigation_buttons.addWidget(previous_button)
+        navigation_buttons.addWidget(next_button)
+        layout.addLayout(navigation_buttons)
 
         layout.addWidget(QLabel("Verse preview"))
         layout.addWidget(self.verse_text)
@@ -408,6 +464,7 @@ class BibleCastWindow(QMainWindow):
             self.hide_suggestions()
 
 
+    
     def find_verse(self):
         """Retrieve a single verse, a verse range or a whole chapter."""
         reference = self.reference.text().strip()
@@ -450,8 +507,23 @@ class BibleCastWindow(QMainWindow):
                 )
 
                 if verses:
-                    self.passage_verses = verses
-                    self.passage_index = 0
+                    all_verses = get_all_verses(translation_code)
+
+                    self.passage_index = find_verse_index(
+                        all_verses,
+                        verses[0]["book_name"],
+                        verses[0]["chapter"],
+                        verses[0]["verse"],
+                    )
+
+                    if self.passage_index is None:
+                        self.clear_selection()
+                        self.status.setText(
+                            "Could not locate the starting verse in the Bible."
+                        )
+                        return
+
+                    self.passage_verses = all_verses
                     self.update_selected_verse()
 
                     self.status.setText(
@@ -484,6 +556,7 @@ class BibleCastWindow(QMainWindow):
         first_verse = result["first_verse"]
         end_verse = result["end_verse"]
 
+        # Validate ranges before enabling full-Bible navigation.
         if end_verse is not None:
             verses = get_verse_range(
                 translation_code,
@@ -502,14 +575,30 @@ class BibleCastWindow(QMainWindow):
         else:
             verses = [first_verse]
 
-        self.passage_verses = verses
-        self.passage_index = 0
+        all_verses = get_all_verses(translation_code)
+
+        self.passage_index = find_verse_index(
+            all_verses,
+            first_verse["book_name"],
+            first_verse["chapter"],
+            first_verse["verse"],
+        )
+
+        if self.passage_index is None:
+            self.clear_selection()
+            self.status.setText(
+                "Could not locate the starting verse in the Bible."
+            )
+            return
+
+        self.passage_verses = all_verses
         self.update_selected_verse()
 
         self.status.setText(
             f"Found {len(verses)} verse(s). "
             f"Selected {self.selected_reference}, ready to preview or cast."
         )
+
 
     def clear_selection(self):
         self.selected_reference = ""
@@ -532,6 +621,57 @@ class BibleCastWindow(QMainWindow):
         )
         self.selected_text = verse["text"]
         self.verse_text.setText(self.selected_text)
+
+
+    def previous_verse(self):
+        """Move to the previous verse within the selected passage."""
+        if not self.passage_verses:
+            self.status.setText("Find a passage before navigating.")
+            return
+
+        if self.passage_index == 0:
+            self.status.setText("Already at the first verse of the Bible.")
+            return
+
+        self.passage_index -= 1
+        self.update_selected_verse()
+        self.update_navigation_status()
+
+    def next_verse(self):
+        """Move to the next verse within the selected passage."""
+        if not self.passage_verses:
+            self.status.setText("Find a passage before navigating.")
+            return
+
+        if self.passage_index >= len(self.passage_verses) - 1:
+            self.status.setText("Already at the last verse of the Bible.")
+            return
+
+        self.passage_index += 1
+        self.update_selected_verse()
+        self.update_navigation_status()
+
+    def update_navigation_status(self):
+        """Update the status and refresh live output when appropriate."""
+        position = (
+            f"{self.passage_index + 1} of {len(self.passage_verses)}"
+        )
+
+        if self.is_live:
+            self.projector.show_verse(
+                self.selected_reference,
+                self.selected_text,
+                self.translation.currentData(),
+            )
+            self.status.setText(
+                f"Now displaying {self.selected_reference} live "
+                f"({position})."
+            )
+        else:
+            self.status.setText(
+                f"Selected {self.selected_reference} ({position}). "
+                "Preview or go live when ready."
+            )
 
     def preview_verse(self):
         """Display the selected verse in the separate preview window."""
@@ -568,6 +708,18 @@ class BibleCastWindow(QMainWindow):
             self.selected_text,
             self.translation.currentData(),
         )
+        self.is_live = True
+        self.mode_indicator.setText("● LIVE")
+        self.mode_indicator.setStyleSheet(
+            """
+            color: #B91C1C;
+            background-color: #FEE2E2;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 8px 12px;
+            border-radius: 6px;
+            """
+        )
         self.projector.showFullScreen()
         self.projector.raise_()
         self.projector.activateWindow()
@@ -579,6 +731,18 @@ class BibleCastWindow(QMainWindow):
     def clear_projector(self):
         """Clear live output without removing the selected verse."""
         self.projector.show_verse("BibleCast", "", "")
+        self.is_live = False
+        self.mode_indicator.setText("● READY")
+        self.mode_indicator.setStyleSheet(
+            """
+            color: #64748B;
+            background-color: #F1F5F9;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 8px 12px;
+            border-radius: 6px;
+            """
+        )
         self.status.setText("Live projector cleared.")
 
 

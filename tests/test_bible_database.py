@@ -6,6 +6,12 @@ from biblecast.bible.database import (
     search_verses,
     initialize_database,
 )
+from biblecast.bible.database import (
+    get_all_verses,
+    get_verse,
+    search_verses,
+    initialize_database,
+)
 from biblecast.bible.importer import import_translation
 from pathlib import Path
 
@@ -94,3 +100,40 @@ def test_search_verses_ignores_punctuation(tmp_path, monkeypatch):
     verse = get_verse("WEB", "Genesis", 1, 1)
     assert verse is not None
     assert "In the beginning" in verse["text"]
+
+def test_get_all_verses_returns_canonical_bible_order(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "test_biblecast.db"
+    monkeypatch.setenv("BIBLECAST_DATABASE_PATH", str(database_path))
+
+    initialize_database()
+
+    translation_path = (
+        Path(__file__).resolve().parents[1]
+        / "data"
+        / "translations"
+        / "WEB"
+        / "web_translation.json"
+    )
+    import_translation(translation_path)
+
+    verses = get_all_verses("WEB")
+
+    assert len(verses) == 31098
+
+    references = [
+        (verse["book_name"], verse["chapter"], verse["verse"])
+        for verse in verses
+    ]
+
+    assert references[0] == ("Genesis", 1, 1)
+    assert references[-1] == ("Revelation", 22, 21)
+
+    # Verify navigation order across a chapter boundary.
+    john_3_last = references.index(("John", 3, 36))
+    assert references[john_3_last + 1] == ("John", 4, 1)
+
+    # Verify navigation order across a book boundary.
+    matthew_last = references.index(("Matthew", 28, 20))
+    assert references[matthew_last + 1] == ("Mark", 1, 1)

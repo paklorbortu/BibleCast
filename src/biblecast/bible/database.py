@@ -312,3 +312,32 @@ def list_verse_numbers(translation_code, book_name, chapter):
         ).fetchall()
 
     return [row["verse"] for row in rows]
+
+
+def get_all_verses(translation_code):
+    """Return every installed verse in canonical Bible order."""
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                t.code AS translation_code,
+                t.name AS translation_name,
+                b.name AS book_name,
+                b.book_number,
+                v.chapter,
+                v.verse,
+                v.text
+            FROM verses v
+            JOIN translations t
+                ON t.id = v.translation_id
+            JOIN books b
+                ON b.id = v.book_id
+            WHERE t.code = ?
+              AND t.is_installed = 1
+            ORDER BY b.book_number, v.chapter, v.verse
+            """,
+            (translation_code,),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
