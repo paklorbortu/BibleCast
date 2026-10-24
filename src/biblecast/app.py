@@ -138,6 +138,7 @@ class BibleCastWindow(QMainWindow):
         self.candidate_thread = None
         self.audio_candidates = []
         self.live_audio_session = None
+        self._close_when_audio_stops = False
         self._candidate_by_reference = {}
 
         # Track the autocomplete stage and selected book.
@@ -243,8 +244,8 @@ class BibleCastWindow(QMainWindow):
         self.start_listening_button.clicked.connect(self.start_listening)
         self.stop_listening_button.clicked.connect(self.stop_listening)
 
-        layout.addWidget(self.start_listening_button)
-        layout.addWidget(self.stop_listening_button)
+        
+        
 
         self.candidate_list.setStyleSheet(
             """
@@ -958,10 +959,10 @@ class BibleCastWindow(QMainWindow):
     
 
     def start_listening(self):
-        """Start offline microphone listening for candidate passages."""
+        """Start offline listening for reviewable passage candidates."""
         if (
             self.live_audio_session is not None
-            and self.live_audio_session.is_listening
+            and self.live_audio_session.is_active
         ):
             return
 
@@ -979,49 +980,80 @@ class BibleCastWindow(QMainWindow):
         session.result_ready.connect(self.on_live_audio_result)
         session.error_occurred.connect(self.on_live_audio_error)
         session.listening_changed.connect(self.on_listening_changed)
+        session.session_stopped.connect(
+            lambda session=session: self.on_live_audio_stopped(session)
+        )
 
         self.live_audio_session = session
+        self.start_listening_button.setEnabled(False)
+        self.stop_listening_button.setEnabled(True)
+        self.status.setText("Starting offline microphone listening...")
 
         try:
             session.start()
         except Exception as exc:
             self.live_audio_session = None
+            self.start_listening_button.setEnabled(True)
+            self.stop_listening_button.setEnabled(False)
             self.status.setText(
                 f"Could not start microphone: {type(exc).__name__}: {exc}"
             )
 
 
     def stop_listening(self):
-        """Request a clean stop without blocking the UI on inference."""
+        """Request shutdown without blocking the interface on inference."""
         session = self.live_audio_session
         if session is None:
             return
 
+        self.stop_listening_button.setEnabled(False)
+        self.status.setText("Stopping microphone and finishing queued audio...")
         session.stop()
-        self.status.setText(
-            "Listening stopped. Finishing any queued audio analysis..."
-        )
+
+
+    def on_listening_changed(self, listening):
+        """Reflect the microphone capture state in the controls."""
+        if listening:
+            self.status.setText(
+                "Listening offline. Detected passages will appear for review."
+            )
+
+
+    def on_live_audio_stopped(self, session):
+        """Release the session only after capture and inference have ended."""
+        if self.live_audio_session is session:
+            self.live_audio_session = None
+
+        self.start_listening_button.setEnabled(True)
         self.stop_listening_button.setEnabled(False)
 
-        # Wait for the inference worker away from the GUI thread.
-        from threading import Thread
+        if self._close_when_audio_stops:
+            self.close()
+            return
 
-        def wait_for_worker():
-            finished = session.wait_until_stopped(timeout=60.0)
-            if finished:
-                self._session_stopped(session)
-            else:
-                session.error_occurred.emit(
-                    "Audio analysis is still finishing. Please wait before "
-                    "starting another listening session."
-                )
+        self.status.setText(
+            "Listening stopped. Review any candidates before previewing "
+            "or going live."
+        )
 
-        Thread(
-            target=wait_for_worker,
-            name="BibleCastAudioShutdown",
-            daemon=True,
-        ).start()
 
+    def on_live_audio_error(self, message):
+        """Show errors without exposing recognized speech."""
+        self.status.setText(message)
+
+    def closeEvent(self, event):
+        """Finish audio shutdown before allowing the app to close."""
+        session = self.live_audio_session
+        if session is not None and session.is_active:
+            self._close_when_audio_stops = True
+            event.ignore()
+            session.stop()
+            self.status.setText(
+                "Closing BibleCast after microphone and audio processing stop..."
+            )
+            return
+
+        event.accept()
 
     def _session_stopped(self, session):
         """Clear a completed session using a queued Qt invocation."""
@@ -1060,6 +1092,11 @@ class BibleCastWindow(QMainWindow):
             return
 
         translation_code = self.translation.currentData()
+        
+        session = self.live_audio_session
+        if session is not None and session.translation_code != translation_code:
+            return
+            
         if not translation_code:
             return
 
