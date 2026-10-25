@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import logging
 
 from biblecast.ai.passage_candidates import (
     PassageCandidate,
@@ -15,6 +16,8 @@ from biblecast.ai.whisper_transcriber import (
     WhisperTranscriber,
 )
 
+
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AudioReferenceResult:
@@ -82,6 +85,14 @@ class AudioReferencePipeline:
             )
 
         transcript = transcription.text.strip()
+        logger.info(
+            "BibleCast audio diagnostic: transcript=%r, "
+            "quality=%s, avg_logprob=%s, no_speech_probability=%s",
+            transcript,
+            transcription.quality,
+            transcription.avg_logprob,
+            transcription.no_speech_probability,
+        )
         if not transcript:
             return AudioReferenceResult(
                 success=False,
