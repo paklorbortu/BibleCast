@@ -2,6 +2,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 from biblecast.ai.audio_reference_pipeline import AudioReferencePipeline
 from biblecast.ai.passage_candidates import PassageCandidate
 from biblecast.ai.whisper_transcriber import TranscriptionResult
@@ -14,6 +16,9 @@ class FakeTranscriber:
 
     def transcribe(self, audio_path):
         self.audio_path = audio_path
+        return self.result
+
+    def transcribe_audio(self, audio, sample_rate=16_000):
         return self.result
 
 
@@ -160,3 +165,52 @@ def test_pipeline_only_suggests_candidates():
     assert result.candidates[0].reference == "John 3:16"
     assert not hasattr(result, "go_live")
     assert not hasattr(result, "approved")
+
+
+def test_merge_overlapping_speech_removes_repeated_words():
+    from biblecast.ai.audio_reference_pipeline import (
+        merge_overlapping_speech,
+    )
+
+    assert merge_overlapping_speech(
+        "the Lord is my", "is my shepherd I shall lack nothing"
+    ) == "the Lord is my shepherd I shall lack nothing"
+    assert merge_overlapping_speech(
+        "hello there", "completely different words"
+    ) == "hello there completely different words"
+
+
+def test_live_quote_split_across_two_segments_is_found():
+    first = TranscriptionResult(
+        success=True, text="the Lord is my", language="en"
+    )
+    second = TranscriptionResult(
+        success=True, text="is my shepherd I shall lack nothing",
+        language="en",
+    )
+    transcriber = FakeTranscriber(first)
+    pipeline = AudioReferencePipeline(transcriber=transcriber)
+    psalm = PassageCandidate(
+        reference="Psalms 23:1",
+        text="The LORD is my shepherd; I shall lack nothing.",
+        score=1.0,
+        match_type="quote",
+        confidence="high",
+    )
+
+    def fake_find(translation_code, text, limit=5):
+        return [psalm] if "shepherd" in text and "the lord" in text.lower() else []
+
+    with patch(
+        "biblecast.ai.audio_reference_pipeline.find_passage_candidates",
+        side_effect=fake_find,
+    ):
+        audio = np.zeros(16_000, dtype=np.float32)
+        assert not pipeline.process_audio(audio, "WEB").success
+
+        transcriber.result = second
+        result = pipeline.process_audio(audio, "WEB")
+
+    assert result.success
+    assert result.candidates[0].reference == "Psalms 23:1"
+

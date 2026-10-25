@@ -163,6 +163,8 @@ _MIN_COVERAGE = 0.5
 _HIGH_COVERAGE = 0.85
 _MEDIUM_COVERAGE = 0.65
 _MAX_WINDOW_VERSES = 3
+_MIN_VERSE_RUN = 5
+_MIN_VERSE_RUN_INFORMATIVE = 3
 _RARE_TOKENS_USED = 3
 
 
@@ -314,18 +316,33 @@ def _match_ordered_quote(
                 ):
                     continue
 
-                coverage = block.size / len(query)
-                if coverage < _MIN_COVERAGE:
-                    continue
-
-                score = coverage * (
-                    len(matched_informative) / len(informative)
-                )
-
                 # Report only the verses the matched words actually touch.
                 first = owners[block.b]
                 last = owners[block.b + block.size - 1]
                 touched = list(group[first:last + 1])
+
+                query_coverage = block.size / len(query)
+                strength = query_coverage
+                score = query_coverage * (
+                    len(matched_informative) / len(informative)
+                )
+
+                # A speaker may quote a verse inside a longer sentence. When
+                # a substantial run covers most of the verse itself, that is
+                # strong evidence however much other speech surrounds it.
+                touched_words = sum(len(item["tokens"]) for item in touched)
+                if (
+                    block.size >= _MIN_VERSE_RUN
+                    and len(matched_informative)
+                    >= _MIN_VERSE_RUN_INFORMATIVE
+                ):
+                    verse_coverage = block.size / touched_words
+                    strength = max(strength, verse_coverage)
+                    score = max(score, verse_coverage)
+
+                if strength < _MIN_COVERAGE:
+                    continue
+
                 reference = _reference_label(touched)
 
                 candidate = PassageCandidate(
@@ -333,7 +350,7 @@ def _match_ordered_quote(
                     text=" ".join(item["text"] for item in touched),
                     score=score,
                     match_type="quote",
-                    confidence=_confidence_for(coverage),
+                    confidence=_confidence_for(strength),
                     evidence=" ".join(matched),
                 )
 

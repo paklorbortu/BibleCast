@@ -71,6 +71,9 @@ class LiveAudioSession(QObject):
                 )
 
             self._queue = Queue(maxsize=self.QUEUE_CAPACITY)
+            reset = getattr(self.pipeline, "reset_context", None)
+            if callable(reset):
+                reset()
             self._stop_event.clear()
             self._started = True
             self._accepting = True

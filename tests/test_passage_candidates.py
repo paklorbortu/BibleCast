@@ -334,3 +334,21 @@ def test_ordinary_speech_returns_nothing():
         assert find_passage_candidates(
             "WEB", "let us pray and thank the Lord for the food"
         ) == []
+
+
+def test_quote_inside_a_longer_sentence_is_still_confident():
+    verses = [{
+        "book_name": "Philippians", "chapter": 4, "verse": 13,
+        "text": "I can do all things through Christ who strengthens me.",
+    }]
+
+    with _patched(verses):
+        candidates = find_passage_candidates(
+            "WEB",
+            "brothers and sisters this week remember I can do all things "
+            "through Christ who strengthens me because he is faithful",
+        )
+
+    assert candidates[0].reference == "Philippians 4:13"
+    assert candidates[0].confidence == "high"
+

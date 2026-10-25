@@ -1,11 +1,8 @@
-from av.audio import layout
-from huggingface_hub.inference._generated.types import zero_shot_image_classification
-from huggingface_hub.inference._generated.types import zero_shot_image_classification
 import re
+import logging
 import sys
 import sounddevice as sd
 
-from huggingface_hub.inference._generated.types import zero_shot_image_classification
 from biblecast.ai.live_audio_session import LiveAudioSession
 from PySide6.QtGui import QShortcut, QKeySequence
 from biblecast.ai.audio_reference_pipeline import AudioReferencePipeline
@@ -1223,6 +1220,10 @@ class BibleCastWindow(QMainWindow):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     app = QApplication(sys.argv)
     app.setApplicationName("BibleCast")
 
