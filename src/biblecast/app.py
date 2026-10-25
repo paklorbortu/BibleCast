@@ -1,6 +1,8 @@
 import re
 import logging
 import sys
+import threading
+from datetime import datetime
 import sounddevice as sd
 
 from biblecast.ai.live_audio_session import LiveAudioSession
@@ -143,7 +145,19 @@ class BibleCastWindow(QMainWindow):
         self.audio_candidates = []
         self.live_audio_session = None
         self._close_when_audio_stops = False
-        self._candidate_by_reference = {}
+
+        # Live suggestions reflect only what the speaker is saying now.
+        self._live_results_enabled = False
+        self._last_auto_preview_reference = ""
+        self._current_best_rank = 0
+        self._verse_cache = {}
+
+        # One pipeline for every session, so the speech model loads once.
+        self.audio_pipeline = AudioReferencePipeline()
+
+        # Verses actually sent to the live projector: (reference,
+        # translation, time).
+        self.live_history = []
 
         # Track the autocomplete stage and selected book.
         self.suggestion_stage = "book"
@@ -241,6 +255,15 @@ class BibleCastWindow(QMainWindow):
         audio_button = QPushButton("Find Passages from Audio")
         self.candidate_list = QListWidget()
         self.candidate_list.setMinimumHeight(140)
+        self.history_list = QListWidget()
+        self.history_list.setMinimumHeight(110)
+        self.history_list.setToolTip(
+            "Verses sent to the live projector, newest first. "
+            "Double-click one to load it for review again."
+        )
+        self.history_list.itemDoubleClicked.connect(
+            self.load_history_item
+        )
         self.start_listening_button = QPushButton("Start Listening")
         self.stop_listening_button = QPushButton("Stop Listening")
         self.stop_listening_button.setEnabled(False)
@@ -281,6 +304,7 @@ class BibleCastWindow(QMainWindow):
         self.candidate_list.setToolTip(
             "Suggested Bible passages. Select one to review it."
         )
+        self.history_list.setStyleSheet(self.candidate_list.styleSheet())
 
         use_candidate_button = QPushButton("Use Selected Candidate")
         use_candidate_button.setEnabled(False)
@@ -371,6 +395,9 @@ class BibleCastWindow(QMainWindow):
         buttons.addWidget(clear_button)
         layout.addLayout(buttons)
 
+        layout.addWidget(QLabel("Live history (verses sent live)"))
+        layout.addWidget(self.history_list)
+
         layout.addWidget(self.status)
         layout.addStretch()
 
@@ -390,6 +417,25 @@ class BibleCastWindow(QMainWindow):
         scroll_area.setWidget(container)
 
         self.setCentralWidget(scroll_area)
+        self._start_audio_warm_up()
+
+    def _start_audio_warm_up(self):
+        """Load the speech model and verse index in the background."""
+        translation_code = self.translation.currentData()
+        if not translation_code:
+            return
+
+        def warm():
+            try:
+                self.audio_pipeline.warm_up(translation_code)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Audio warm-up skipped: %s", exc
+                )
+
+        threading.Thread(
+            target=warm, name="BibleCastWarmUp", daemon=True
+        ).start()
 
     def load_translations(self):
         """Populate the dropdown with installed Bible translations."""
@@ -447,6 +493,7 @@ class BibleCastWindow(QMainWindow):
 
     def on_translation_changed(self):
         self.refresh_book_completer()
+        self._start_audio_warm_up()
 
         # The selected verse may not exist in the newly selected translation.
         self.clear_selection()
@@ -701,6 +748,38 @@ class BibleCastWindow(QMainWindow):
         """Allow another search after the worker has stopped."""
         self.candidate_thread = None
 
+    def _all_verses(self, translation_code):
+        """Return every verse for a translation, loaded once."""
+        if translation_code not in self._verse_cache:
+            self._verse_cache[translation_code] = get_all_verses(
+                translation_code
+            )
+        return self._verse_cache[translation_code]
+
+    def load_reference_for_review(self, reference):
+        """Select a reference for review. Returns False if it can't load."""
+        translation_code = self.translation.currentData()
+        resolved = resolve_reference(translation_code, reference)
+        if resolved is None:
+            return False
+
+        all_verses = self._all_verses(translation_code)
+        first_verse = resolved["first_verse"]
+        index = find_verse_index(
+            all_verses,
+            first_verse["book_name"],
+            first_verse["chapter"],
+            first_verse["verse"],
+        )
+        if index is None:
+            return False
+
+        self.reference.setText(reference)
+        self.passage_verses = all_verses
+        self.passage_index = index
+        self.update_selected_verse()
+        return True
+
     def use_selected_candidate(self):
         """Load a chosen candidate into the normal preview selection."""
         row = self.candidate_list.currentRow()
@@ -709,47 +788,66 @@ class BibleCastWindow(QMainWindow):
             self.status.setText("Select a candidate first.")
             return
 
-        translation_code = self.translation.currentData()
         candidate = self.audio_candidates[row]
-
-        resolved = resolve_reference(
-            translation_code,
-            candidate.reference,
-        )
-        if resolved is None:
+        if not self.load_reference_for_review(candidate.reference):
             self.status.setText(
                 "That candidate could not be resolved in the selected "
                 "translation. Try searching again."
             )
             return
 
-        all_verses = get_all_verses(translation_code)
-        first_verse = resolved["first_verse"]
-
-        index = find_verse_index(
-            all_verses,
-            first_verse["book_name"],
-            first_verse["chapter"],
-            first_verse["verse"],
-        )
-        if index is None:
-            self.status.setText(
-                "Could not locate the selected candidate in the Bible."
-            )
-            return
-
-        self.reference.setText(candidate.reference)
-        self.passage_verses = all_verses
-        self.passage_index = index
-        self.update_selected_verse()
-
         self.status.setText(
             f"Selected {self.selected_reference} for review. "
             "It is not live. Use Preview or Go Live when ready."
         )
 
+    def load_history_item(self, item):
+        """Reload a previously live verse for review. Nothing goes live."""
+        row = self.history_list.row(item)
+        # The list shows newest first; live_history is oldest first.
+        index = len(self.live_history) - 1 - row
+        if index < 0 or index >= len(self.live_history):
+            return
 
-    
+        reference = self.live_history[index][0]
+        if self.load_reference_for_review(reference):
+            self.status.setText(
+                f"Loaded {self.selected_reference} from history for "
+                "review. It is not live."
+            )
+
+    def _record_live_history(self):
+        """Add the verse now on the live projector to the history pane."""
+        if not self.selected_reference:
+            return
+
+        translation_code = self.translation.currentData() or ""
+        if (
+            self.live_history
+            and self.live_history[-1][:2]
+            == (self.selected_reference, translation_code)
+        ):
+            return
+
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.live_history.append(
+            (self.selected_reference, translation_code, stamp)
+        )
+        self.history_list.insertItem(
+            0,
+            QListWidgetItem(
+                f"{stamp}  |  {self.selected_reference} "
+                f"({translation_code})\n{self.selected_text}"
+            ),
+        )
+
+    def clear_suggestions(self):
+        """Empty the suggestions box and its live detection state."""
+        self.audio_candidates = []
+        self._last_auto_preview_reference = ""
+        self._current_best_rank = 0
+        self.candidate_list.clear()
+
     def find_verse(self):
         """Retrieve a single verse, a verse range or a whole chapter."""
         reference = self.reference.text().strip()
@@ -948,6 +1046,7 @@ class BibleCastWindow(QMainWindow):
                 self.selected_text,
                 self.translation.currentData(),
             )
+            self._record_live_history()
             self.status.setText(
                 f"Now displaying {self.selected_reference} live "
                 f"({position})."
@@ -1008,6 +1107,7 @@ class BibleCastWindow(QMainWindow):
         self.projector.showFullScreen()
         self.projector.raise_()
         self.projector.activateWindow()
+        self._record_live_history()
 
         self.status.setText(
             f"Now displaying {self.selected_reference} live."
@@ -1056,6 +1156,7 @@ class BibleCastWindow(QMainWindow):
 
         session = LiveAudioSession(
             translation_code=translation_code,
+            pipeline=self.audio_pipeline,
             parent=self,
             device=device,
         )
@@ -1071,9 +1172,14 @@ class BibleCastWindow(QMainWindow):
         self.stop_listening_button.setEnabled(True)
         self.status.setText("Starting offline microphone listening...")
 
+        # Each listening session starts with an empty suggestions box.
+        self.clear_suggestions()
+        self._live_results_enabled = True
+
         try:
             session.start()
         except Exception as exc:
+            self._live_results_enabled = False
             self.live_audio_session = None
             self.start_listening_button.setEnabled(True)
             self.stop_listening_button.setEnabled(False)
@@ -1087,6 +1193,10 @@ class BibleCastWindow(QMainWindow):
         session = self.live_audio_session
         if session is None:
             return
+
+        # Suggestions belong to the current listening session only.
+        self._live_results_enabled = False
+        self.clear_suggestions()
 
         self.stop_listening_button.setEnabled(False)
         self.status.setText("Stopping microphone and finishing queued audio...")
@@ -1106,6 +1216,8 @@ class BibleCastWindow(QMainWindow):
         if self.live_audio_session is session:
             self.live_audio_session = None
 
+        self._live_results_enabled = False
+        self.clear_suggestions()
         self.start_listening_button.setEnabled(True)
         self.stop_listening_button.setEnabled(False)
 
@@ -1114,8 +1226,8 @@ class BibleCastWindow(QMainWindow):
             return
 
         self.status.setText(
-            "Listening stopped. Review any candidates before previewing "
-            "or going live."
+            "Listening stopped. Suggestions cleared. Verses sent live "
+            "are kept in the live history."
         )
 
 
@@ -1137,86 +1249,96 @@ class BibleCastWindow(QMainWindow):
 
         event.accept()
 
-    def _session_stopped(self, session):
-        """Clear a completed session using a queued Qt invocation."""
-        from PySide6.QtCore import QTimer
-
-        def finish_on_ui_thread():
-            if self.live_audio_session is session:
-                self.live_audio_session = None
-                self.start_listening_button.setEnabled(True)
-                self.stop_listening_button.setEnabled(False)
-                self.status.setText("Listening stopped.")
-
-        QTimer.singleShot(0, finish_on_ui_thread)
-
-
-    def on_listening_changed(self, listening):
-        """Reflect microphone state in the controls."""
-        self.start_listening_button.setEnabled(not listening)
-        self.stop_listening_button.setEnabled(listening)
-        self.status.setText(
-            "Listening for Bible references. Detected passages will "
-            "appear as candidates for review."
-            if listening
-            else "Listening stopped."
-        )
-
-
-    def on_live_audio_error(self, message):
-        """Show audio errors without exposing the transcript."""
-        self.status.setText(message)
-
+    _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 
     def on_live_audio_result(self, result):
-        """Merge new candidates without duplicating overlapping segments."""
-        if result is None or not result.success:
+        """Show what the speaker just said and preview the best match."""
+        if (
+            not self._live_results_enabled
+            or result is None
+            or not result.success
+        ):
             return
 
         translation_code = self.translation.currentData()
-        
         session = self.live_audio_session
+        if not translation_code:
+            return
         if session is not None and session.translation_code != translation_code:
             return
 
-        if not translation_code:
+        ranked = sorted(
+            result.candidates,
+            key=lambda item: (
+                -self._CONFIDENCE_RANK.get(item.confidence, 0),
+                -item.score,
+            ),
+        )
+        if not ranked:
             return
 
-        for candidate in result.candidates:
-            key = (
-                translation_code.casefold(),
-                candidate.reference.casefold(),
-            )
-            previous = self._candidate_by_reference.get(key)
+        best_rank = self._CONFIDENCE_RANK.get(ranked[0].confidence, 0)
 
-            # Overlapping segments often rediscover the same verse. Keep one
-            # row and replace it only if the new match has a higher score.
-            if previous is not None and previous.score >= candidate.score:
-                continue
-
-            self._candidate_by_reference[key] = candidate
-
-        self.audio_candidates = list(self._candidate_by_reference.values())
-        self.candidate_list.clear()
-
-        for candidate in sorted(
-            self.audio_candidates,
-            key=lambda item: item.score,
-            reverse=True,
+        # A weak guess must not push aside a confident suggestion.
+        if self.audio_candidates and best_rank < 2 and (
+            self._current_best_rank >= 2
         ):
-            label = (
-                f"{candidate.reference}  |  "
-                f"{candidate.match_type} match  |  "
-                f"{candidate.score:.0%}\n"
-                f"{candidate.text}"
-            )
-            self.candidate_list.addItem(QListWidgetItem(label))
+            return
 
-        self.status.setText(
-            f"{len(self.audio_candidates)} candidate passage(s) available. "
-            "Select a candidate to review it. Nothing has been cast live."
+        # Overlapping segments rediscover the same verse; leave the list
+        # (and the operator's selection) alone when nothing changed.
+        references = [item.reference for item in ranked]
+        if references != [item.reference for item in self.audio_candidates]:
+            self.audio_candidates = list(ranked)
+            self._current_best_rank = best_rank
+            self.candidate_list.clear()
+            for candidate in ranked:
+                self.candidate_list.addItem(
+                    QListWidgetItem(
+                        f"{candidate.reference}  |  "
+                        f"{candidate.match_type} match  |  "
+                        f"{candidate.confidence}  |  "
+                        f"{candidate.score:.0%}\n"
+                        f"{candidate.text}"
+                    )
+                )
+
+        timing = (
+            f" ({result.elapsed_ms:.0f} ms)" if result.elapsed_ms else ""
         )
+        top = ranked[0]
 
+        # Preview the strongest match straight away. Never send it live.
+        if (
+            best_rank >= 2
+            and top.reference != self._last_auto_preview_reference
+            and self._auto_preview(top)
+        ):
+            self._last_auto_preview_reference = top.reference
+            self.status.setText(
+                f"Detected {top.reference} and loaded it in the preview"
+                f"{timing}. Nothing has been sent live."
+            )
+        elif best_rank < 2:
+            self.status.setText(
+                f"{len(ranked)} possible passage(s){timing}. "
+                "Low confidence, so nothing was previewed."
+            )
+
+    def _auto_preview(self, candidate):
+        """Load a candidate into the preview window. Returns success."""
+        if not self.load_reference_for_review(candidate.reference):
+            return False
+
+        self.preview_projector.show_verse(
+            self.selected_reference,
+            self.selected_text,
+            self.translation.currentData(),
+        )
+        # Show it once without stealing focus on every detection.
+        if not self.preview_projector.isVisible():
+            self.preview_projector.show()
+        return True
 
 
 def main():

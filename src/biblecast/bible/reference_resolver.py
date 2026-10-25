@@ -27,6 +27,25 @@ _BOOK_ALIASES = {
 }
 
 
+# Names used to accept a chapter-only reference ("Job chapter 38"). Requiring
+# a real book name keeps ordinary speech such as "point 3" from matching.
+_BOOK_NAMES = (
+    "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua",
+    "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
+    "1 Chronicles", "2 Chronicles", "Ezra", "Nehemiah", "Esther", "Job",
+    "Psalms", "Proverbs", "Ecclesiastes", "Song of Solomon", "Isaiah",
+    "Jeremiah", "Lamentations", "Ezekiel", "Daniel", "Hosea", "Joel",
+    "Amos", "Obadiah", "Jonah", "Micah", "Nahum", "Habakkuk", "Zephaniah",
+    "Haggai", "Zechariah", "Malachi", "Matthew", "Mark", "Luke", "John",
+    "Acts", "Romans", "1 Corinthians", "2 Corinthians", "Galatians",
+    "Ephesians", "Philippians", "Colossians", "1 Thessalonians",
+    "2 Thessalonians", "1 Timothy", "2 Timothy", "Titus", "Philemon",
+    "Hebrews", "James", "1 Peter", "2 Peter", "1 John", "2 John",
+    "3 John", "Jude", "Revelation",
+)
+KNOWN_BOOKS = frozenset(name.casefold() for name in _BOOK_NAMES)
+
+
 def canonical_book_name(name):
     """Map a spoken or alternative book name to its stored form.
 
@@ -111,9 +130,62 @@ def parse_reference(reference):
 
 
 
-def resolve_reference(translation_code, reference):
-    """Resolve a reference to its first verse and optional range."""
+CHAPTER_PATTERN = re.compile(
+    r"""
+    ^\s*
+    (?P<book>
+        (?:[1-3]\s*)?
+        [A-Za-z]+
+        (?:\s+[A-Za-z]+)*?
+    )
+    \s+
+    (?:chapter\s+)?
+    (?P<chapter>\d+)
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def parse_chapter_reference(reference):
+    """Parse a book and chapter with no verse, such as "Job chapter 38".
+
+    The result points at verse 1 so the operator sees the start of the
+    chapter. Only real Bible book names are accepted.
+    """
+    match = CHAPTER_PATTERN.match(reference)
+    if not match:
+        return None
+
+    book = canonical_book_name(" ".join(match.group("book").split()))
+    chapter = int(match.group("chapter"))
+
+    if chapter < 1 or book.casefold() not in KNOWN_BOOKS:
+        return None
+
+    return {
+        "book": book,
+        "chapter": chapter,
+        "verse": 1,
+        "end_verse": None,
+        "chapter_only": True,
+    }
+
+
+def resolve_reference(
+    translation_code,
+    reference,
+    allow_chapter_only=False,
+):
+    """Resolve a reference to its first verse and optional range.
+
+    With allow_chapter_only, "Job 38" resolves to the first verse of the
+    chapter and the result is marked with chapter_only=True.
+    """
     parsed = parse_reference(reference)
+
+    if parsed is None and allow_chapter_only:
+        parsed = parse_chapter_reference(reference)
 
     if parsed is None:
         return None

@@ -154,6 +154,26 @@ def _extract_explicit_reference(
                 if resolved is not None:
                     return resolved
 
+    # A book and chapter with no verse ("Job chapter 38") opens verse 1.
+    chapter_pattern = re.compile(
+        r"\b((?:[1-3]\s+)?[A-Za-z]+(?:\s+[A-Za-z]+){0,3})\s+"
+        r"(?:chapter\s+)?(\d+)\b(?!\s*:)",
+        re.IGNORECASE,
+    )
+    for match in chapter_pattern.finditer(normalized):
+        book_text = re.sub(
+            r"\s+chapter$", "", match.group(1), flags=re.IGNORECASE
+        )
+        words = f"{book_text} {match.group(2)}".split()
+        for start in range(len(words) - 1):
+            resolved = resolve_reference(
+                translation_code,
+                " ".join(words[start:]),
+                allow_chapter_only=True,
+            )
+            if resolved is not None:
+                return resolved
+
     return None
 
 
@@ -210,6 +230,11 @@ def _build_quote_index(translation_code: str) -> _QuoteIndex:
             for token, positions in postings.items()
         },
     )
+
+
+def warm_up_quote_index(translation_code: str) -> None:
+    """Build the verse index ahead of the first spoken passage."""
+    _build_quote_index(translation_code)
 
 
 def clear_quote_cache() -> None:

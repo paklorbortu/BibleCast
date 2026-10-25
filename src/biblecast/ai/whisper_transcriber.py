@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -30,11 +32,17 @@ class WhisperTranscriber:
 
     def __init__(
         self,
-        model_size: str = "small",
+        model_size: str | None = None,
         device: str = "cpu",
         compute_type: str = "int8",
     ) -> None:
-        self.model_size = model_size
+        # BIBLECAST_WHISPER_MODEL lets a slower computer pick a faster model
+        # (for example "base.en" or "tiny.en") without changing code.
+        self.model_size = (
+            model_size
+            or os.environ.get("BIBLECAST_WHISPER_MODEL")
+            or "small"
+        )
         self.device = device
         self.compute_type = compute_type
         self._model = None
@@ -52,6 +60,11 @@ class WhisperTranscriber:
             )
 
         return self._model
+
+    def warm_up(self) -> None:
+        """Load the speech model now so the first live segment is fast."""
+        with self._lock:
+            self._get_model()
 
     def transcribe(self, audio_path: str | Path) -> TranscriptionResult:
         """Transcribe an existing audio file."""
@@ -133,13 +146,17 @@ class WhisperTranscriber:
         try:
             with self._lock:
                 model = self._get_model()
+                # Live audio favours speed: greedy decoding, and a voice
+                # activity filter so pauses are skipped instead of decoded.
                 segments, info = model.transcribe(
                     samples,
                     language="en",
-                    beam_size=5,
+                    beam_size=1,
                     temperature=0.0,
                     condition_on_previous_text=False,
-                    vad_filter=False,
+                    without_timestamps=True,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 300},
                 )
                 return self._collect_result(segments, info)
 

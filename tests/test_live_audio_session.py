@@ -1,5 +1,4 @@
 
-from _pytest import pytester_assertions
 import threading
 import time
 

@@ -16,8 +16,8 @@ class MicrophoneCapture:
 
     SAMPLE_RATE = 16_000
     CHANNELS = 1
-    SEGMENT_SECONDS = 4.0
-    OVERLAP_SECONDS = 0.75
+    SEGMENT_SECONDS = 3.0
+    OVERLAP_SECONDS = 1.0
     BLOCK_SECONDS = 0.1
     QUEUE_BLOCKS = 50
 

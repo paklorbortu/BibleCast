@@ -214,3 +214,21 @@ def test_live_quote_split_across_two_segments_is_found():
     assert result.success
     assert result.candidates[0].reference == "Psalms 23:1"
 
+
+def test_live_result_reports_processing_time():
+    transcription = TranscriptionResult(
+        success=True, text="Be strong and courageous.", language="en"
+    )
+    pipeline, _ = make_pipeline(transcription)
+
+    with patch(
+        "biblecast.ai.audio_reference_pipeline.find_passage_candidates",
+        return_value=sample_candidates(),
+    ):
+        result = pipeline.process_audio(
+            np.zeros(16_000, dtype=np.float32), "WEB"
+        )
+
+    assert result.success
+    assert result.elapsed_ms >= 0.0
+

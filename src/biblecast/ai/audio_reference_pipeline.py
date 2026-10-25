@@ -1,7 +1,8 @@
 
 """Coordinate local audio transcription and Bible passage matching."""
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import logging
@@ -12,6 +13,7 @@ import numpy as np
 from biblecast.ai.passage_candidates import (
     PassageCandidate,
     find_passage_candidates,
+    warm_up_quote_index,
 )
 from biblecast.ai.whisper_transcriber import (
     TranscriptionResult,
@@ -65,6 +67,7 @@ class AudioReferenceResult:
     transcription: TranscriptionResult | None = None
     candidates: tuple[PassageCandidate, ...] = ()
     error: str = ""
+    elapsed_ms: float = 0.0
 
 
 class AudioReferencePipeline:
@@ -99,15 +102,33 @@ class AudioReferencePipeline:
         limit: int = 5,
     ) -> AudioReferenceResult:
         """Process microphone samples directly from memory."""
+        started = time.perf_counter()
         transcription = self.transcriber.transcribe_audio(
             audio,
             sample_rate=sample_rate,
         )
-        return self._match_live_transcription(
+        transcribed = time.perf_counter()
+        result = self._match_live_transcription(
             transcription,
             translation_code,
             limit,
         )
+        finished = time.perf_counter()
+
+        logger.info(
+            "BibleCast timing: transcribe=%.0fms match=%.0fms total=%.0fms",
+            (transcribed - started) * 1000,
+            (finished - transcribed) * 1000,
+            (finished - started) * 1000,
+        )
+        return replace(result, elapsed_ms=(finished - started) * 1000)
+
+    def warm_up(self, translation_code: str) -> None:
+        """Load the speech model and verse index before listening starts."""
+        warm = getattr(self.transcriber, "warm_up", None)
+        if callable(warm):
+            warm()
+        warm_up_quote_index(translation_code)
 
     def reset_context(self) -> None:
         """Forget recent speech, e.g. when a new listening session starts."""

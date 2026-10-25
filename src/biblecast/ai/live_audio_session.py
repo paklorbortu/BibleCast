@@ -24,7 +24,7 @@ class LiveAudioSession(QObject):
     listening_changed = Signal(bool)
     session_stopped = Signal()
 
-    QUEUE_CAPACITY = 3
+    QUEUE_CAPACITY = 5
 
     def __init__(
         self,

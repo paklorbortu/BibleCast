@@ -20,7 +20,7 @@ def _fresh_quote_cache():
 def _fake_resolver(known):
     """Build a resolve_reference stand-in that needs no database."""
 
-    def resolve(translation_code, reference):
+    def resolve(translation_code, reference, **_options):
         return known.get(reference)
 
     return resolve
@@ -351,4 +351,35 @@ def test_quote_inside_a_longer_sentence_is_still_confident():
 
     assert candidates[0].reference == "Philippians 4:13"
     assert candidates[0].confidence == "high"
+
+
+def test_book_and_chapter_without_verse_opens_verse_one():
+    job = _resolved("Job", 38, 1, "Then Yahweh answered Job.")
+
+    with patch(
+        "biblecast.ai.passage_candidates.resolve_reference",
+        _fake_resolver({"Job 38": job}),
+    ):
+        for spoken in (
+            "Job chapter 38",
+            "please open Job chapter thirty eight",
+            "turn to Job 38",
+        ):
+            candidates = find_passage_candidates("WEB", spoken)
+            assert candidates[0].reference == "Job 38:1", spoken
+            assert candidates[0].match_type == "explicit"
+
+
+def test_chapter_only_is_not_used_when_a_verse_is_spoken():
+    verse = _resolved("Job", 38, 4, "Where were you when I laid the earth?")
+
+    with patch(
+        "biblecast.ai.passage_candidates.resolve_reference",
+        _fake_resolver({"Job 38:4": verse}),
+    ):
+        candidates = find_passage_candidates(
+            "WEB", "Job chapter 38 verse 4"
+        )
+
+    assert candidates[0].reference == "Job 38:4"
 
