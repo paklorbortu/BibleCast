@@ -304,15 +304,14 @@ def _match_ordered_quote(
                 evidence=" ".join(matched_tokens),
             )
         )
-
-        ranked.sort(
-            key=lambda item: (
-                -item.score,
-                len(_quote_tokens(item.text)),
-                item.reference,
-            )
-        )
-        return ranked[:limit]
+    ranked.sort(
+        key=lambda item: (
+            -item.score,
+            len(_quote_tokens(item.text)),
+            item.reference,
+        )        
+    )
+    return ranked[:limit]
 
 
 
