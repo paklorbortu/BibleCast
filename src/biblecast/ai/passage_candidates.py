@@ -305,8 +305,14 @@ def _match_ordered_quote(
             )
         )
 
-    ranked.sort(key=lambda item: (-item.score, item.reference))
-    return ranked[:limit]
+        ranked.sort(
+            key=lambda item: (
+                -item.score,
+                len(_quote_tokens(item.text)),
+                item.reference,
+            )
+        )
+        return ranked[:limit]
 
 
 
