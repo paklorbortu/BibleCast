@@ -1,7 +1,10 @@
 
 from unittest.mock import patch
 
-from biblecast.ai.passage_candidates import find_passage_candidates
+from biblecast.ai.passage_candidates import (
+    _build_quote_index,
+    find_passage_candidates,
+)
 
 
 def test_resolves_explicit_spoken_reference_without_gemma():
@@ -93,6 +96,8 @@ def test_returns_multiple_ranked_candidates_for_ambiguous_quote():
         },
     ]
 
+    _build_quote_index.cache_clear()
+
     with patch(
         "biblecast.ai.passage_candidates.get_all_verses",
         return_value=verses,
@@ -102,6 +107,8 @@ def test_returns_multiple_ranked_candidates_for_ambiguous_quote():
             "Be strong and courageous",
             limit=2,
         )
+
+    _build_quote_index.cache_clear()
 
     assert len(candidates) == 2
     assert candidates[0].score >= candidates[1].score

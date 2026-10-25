@@ -1,7 +1,6 @@
 
 """Find explicit Bible references and rank local passage candidates."""
 from __future__ import annotations
-from numpy._core import getlimits
 
 import re
 from collections import Counter
@@ -180,19 +179,9 @@ def _score_passage(query_tokens: list[str], verse_text: str) -> float:
     return matched / sum(query_counts.values())
 
 
-def _score_passage(query_tokens: set[str], verse_text: str) -> float:
-    verse_tokens = set(_tokens(verse_text))
-    if not query_tokens:
-        return 0.0
-
-    return len(query_tokens & verse_tokens) / len(query_tokens)
-
-
 # INSERT THE NEW HELPERS HERE
 
-_QUOTE_STOP_WORDS = _STOP_WORDS | {
-    "yahweh", "lord", "god", "jesus", "christ"
-}
+_QUOTE_STOP_WORDS = _STOP_WORDS 
 
 
 def _quote_tokens(text: str) -> list[str]:
