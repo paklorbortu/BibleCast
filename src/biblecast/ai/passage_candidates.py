@@ -1,12 +1,13 @@
 
 """Find explicit Bible references and rank local passage candidates."""
+
 from __future__ import annotations
 
 import re
-from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from functools import lru_cache
+
 from biblecast.bible.database import get_all_verses
 from biblecast.bible.reference_resolver import resolve_reference
 
@@ -21,6 +22,7 @@ class PassageCandidate:
     match_type: str
     confidence: str = "low"
     evidence: str = ""
+
 
 _NUMBER_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
@@ -141,47 +143,35 @@ def _extract_explicit_reference(
                     f"{match.group(2)}:{match.group(3)}"
                 )
 
-            resolved = resolve_reference(
-                translation_code,
-                candidate_text,
-            )
-            if resolved is not None:
-                return resolved
+            # Leading filler such as "let's read" may be captured as part
+            # of the book name, so retry with fewer leading words.
+            words = candidate_text.split()
+            for start in range(len(words) - 1):
+                resolved = resolve_reference(
+                    translation_code,
+                    " ".join(words[start:]),
+                )
+                if resolved is not None:
+                    return resolved
 
     return None
 
 
-def _tokens(text: str) -> list[str]:
-    """Normalize text into meaningful lexical tokens."""
-
-    tokens = re.findall(r"[a-z]+", text.casefold())
-    return [
-        token
-        for token in tokens
-        if token not in _STOP_WORDS and len(token) > 1
-    ]
+_MIN_QUERY_WORDS = 4
+_MIN_INFORMATIVE_WORDS = 2
+_MIN_COVERAGE = 0.5
+_HIGH_COVERAGE = 0.85
+_MEDIUM_COVERAGE = 0.65
+_MAX_WINDOW_VERSES = 3
+_RARE_TOKENS_USED = 3
 
 
-def _score_passage(query_tokens: list[str], verse_text: str) -> float:
-    """Score the proportion of query words found in a verse."""
+@dataclass(frozen=True)
+class _QuoteIndex:
+    """Cached verse data and a word to verse lookup for one translation."""
 
-    verse_tokens = set(_tokens(verse_text))
-    query_counts = Counter(query_tokens)
-
-    if not query_counts:
-        return 0.0
-
-    matched = sum(
-        count
-        for token, count in query_counts.items()
-        if token in verse_tokens
-    )
-    return matched / sum(query_counts.values())
-
-
-# INSERT THE NEW HELPERS HERE
-
-_QUOTE_STOP_WORDS = _STOP_WORDS 
+    verses: tuple[dict, ...]
+    postings: dict[str, tuple[int, ...]]
 
 
 def _quote_tokens(text: str) -> list[str]:
@@ -189,61 +179,66 @@ def _quote_tokens(text: str) -> list[str]:
     return re.findall(r"[a-z]+", text.casefold())
 
 
-@lru_cache(maxsize=4)
-def _build_quote_index(translation_code: str) -> tuple[dict, ...]:
-    """Cache verse text and ordered tokens for each translation."""
-    indexed = []
+def _is_informative(token: str) -> bool:
+    return token not in _STOP_WORDS and len(token) > 2
 
-    for verse in get_all_verses(translation_code):
-        indexed.append({
-            "reference": (
-                f'{verse["book_name"]} '
-                f'{verse["chapter"]}:{verse["verse"]}'
-            ),
+
+@lru_cache(maxsize=4)
+def _build_quote_index(translation_code: str) -> _QuoteIndex:
+    """Cache verse tokens and a word lookup for each translation."""
+    verses = []
+    postings: dict[str, list[int]] = {}
+
+    for position, verse in enumerate(get_all_verses(translation_code)):
+        tokens = tuple(_quote_tokens(verse["text"]))
+        verses.append({
             "book_name": verse["book_name"],
             "chapter": verse["chapter"],
             "verse": verse["verse"],
             "text": verse["text"],
-            "tokens": tuple(_quote_tokens(verse["text"])),
+            "tokens": tokens,
         })
+        for token in set(tokens):
+            postings.setdefault(token, []).append(position)
 
-    return tuple(indexed)
+    return _QuoteIndex(
+        verses=tuple(verses),
+        postings={
+            token: tuple(positions)
+            for token, positions in postings.items()
+        },
+    )
 
 
-def _build_quote_windows(
-    verses: tuple[dict, ...],
-) -> list[dict]:
-    """Build searchable windows of one to three consecutive verses."""
-    windows = []
+def clear_quote_cache() -> None:
+    """Drop cached verse data, e.g. after a translation is imported."""
+    _build_quote_index.cache_clear()
 
-    for start in range(len(verses)):
-        for size in (1, 2, 3):
-            end = start + size
 
-            if end > len(verses):
-                break
+def _consecutive(group: tuple[dict, ...]) -> bool:
+    """True when the verses are adjacent in the same book and chapter."""
+    return all(
+        group[i]["book_name"] == group[0]["book_name"]
+        and group[i]["chapter"] == group[0]["chapter"]
+        and group[i]["verse"] == group[i - 1]["verse"] + 1
+        for i in range(1, len(group))
+    )
 
-            group = verses[start:end]
 
-            if any(
-                group[i]["book_name"] != group[0]["book_name"]
-                or group[i]["chapter"] != group[0]["chapter"]
-                or group[i]["verse"] != group[i - 1]["verse"] + 1
-                for i in range(1, len(group))
-            ):
-                break
+def _reference_label(group: list[dict]) -> str:
+    first, last = group[0], group[-1]
+    label = f'{first["book_name"]} {first["chapter"]}:{first["verse"]}'
+    if last is not first:
+        label += f'-{last["verse"]}'
+    return label
 
-            windows.append({
-                "reference": group[0]["reference"],
-                "text": " ".join(item["text"] for item in group),
-                "tokens": tuple(
-                    token
-                    for item in group
-                    for token in item["tokens"]
-                ),
-            })
 
-    return windows
+def _confidence_for(coverage: float) -> str:
+    if coverage >= _HIGH_COVERAGE:
+        return "high"
+    if coverage >= _MEDIUM_COVERAGE:
+        return "medium"
+    return "low"
 
 
 def _match_ordered_quote(
@@ -251,68 +246,116 @@ def _match_ordered_quote(
     translation_code: str,
     limit: int,
 ) -> list[PassageCandidate]:
-    """Find quotations supported by an ordered run of matching words."""
+    """Find quotations supported by an ordered run of matching words.
+
+    Only verses sharing the rarest query words are examined, each
+    alongside up to two following verses, so a quotation that crosses a
+    verse boundary is still found. Each verse is reported once.
+    """
     query = _quote_tokens(transcript)
+    informative = [token for token in query if _is_informative(token)]
 
-    informative = [
-        token for token in query
-        if token not in _QUOTE_STOP_WORDS and len(token) > 2
-    ]
-
-    if len(query) < 4 or len(informative) < 2:
+    if len(query) < _MIN_QUERY_WORDS or (
+        len(informative) < _MIN_INFORMATIVE_WORDS
+    ):
         return []
 
-    verses = _build_quote_index(translation_code)
-    windows = _build_quote_windows(verses)
-    ranked = []
+    index = _build_quote_index(translation_code)
+    verses = index.verses
 
-    for window in windows:
-        target = list(window["tokens"])
-        matcher = SequenceMatcher(
-            None, query, target, autojunk=False
-        )
-        block = matcher.find_longest_match(
-            0, len(query), 0, len(target)
-        )
+    # Candidate verses come from the rarest informative query words, so one
+    # misheard word does not hide the real verse.
+    distinct = sorted(
+        set(informative),
+        key=lambda token: len(index.postings.get(token, ())),
+    )
+    rare = [t for t in distinct if t in index.postings][:_RARE_TOKENS_USED]
+    candidate_verses = {
+        position
+        for token in rare
+        for position in index.postings[token]
+    }
 
-        matched_tokens = query[
-            block.a:block.a + block.size
-        ]
-        matched_informative = [
-            token for token in matched_tokens
-            if token not in _QUOTE_STOP_WORDS and len(token) > 2
-        ]
+    seen_windows = set()
+    best: dict[str, PassageCandidate] = {}
 
-        if block.size < 4 or len(matched_informative) < 2:
-            continue
+    for position in candidate_verses:
+        for start in range(
+            max(0, position - _MAX_WINDOW_VERSES + 1), position + 1
+        ):
+            for size in range(1, _MAX_WINDOW_VERSES + 1):
+                end = start + size
+                if end > len(verses) or (start, size) in seen_windows:
+                    continue
+                group = verses[start:end]
+                if not _consecutive(group):
+                    break
+                seen_windows.add((start, size))
 
-        coverage = block.size / len(query)
-        if coverage < 0.5:
-            continue
+                target: list[str] = []
+                owners: list[int] = []
+                for offset, item in enumerate(group):
+                    target.extend(item["tokens"])
+                    owners.extend([offset] * len(item["tokens"]))
 
-        score = coverage * (
-            len(matched_informative) / len(informative)
-        )
+                if len(set(informative) & set(target)) < _MIN_INFORMATIVE_WORDS:
+                    continue
 
-        ranked.append(
-            PassageCandidate(
-                reference=window["reference"],
-                text=window["text"],
-                score=score,
-                match_type="quote",
-                confidence="medium",
-                evidence=" ".join(matched_tokens),
-            )
-        )
-    ranked.sort(
+                block = SequenceMatcher(
+                    None, query, target, autojunk=False
+                ).find_longest_match(0, len(query), 0, len(target))
+
+                matched = query[block.a:block.a + block.size]
+                matched_informative = [
+                    t for t in matched if _is_informative(t)
+                ]
+                if block.size < _MIN_QUERY_WORDS or (
+                    len(matched_informative) < _MIN_INFORMATIVE_WORDS
+                ):
+                    continue
+
+                coverage = block.size / len(query)
+                if coverage < _MIN_COVERAGE:
+                    continue
+
+                score = coverage * (
+                    len(matched_informative) / len(informative)
+                )
+
+                # Report only the verses the matched words actually touch.
+                first = owners[block.b]
+                last = owners[block.b + block.size - 1]
+                touched = list(group[first:last + 1])
+                reference = _reference_label(touched)
+
+                candidate = PassageCandidate(
+                    reference=reference,
+                    text=" ".join(item["text"] for item in touched),
+                    score=score,
+                    match_type="quote",
+                    confidence=_confidence_for(coverage),
+                    evidence=" ".join(matched),
+                )
+
+                current = best.get(reference)
+                if current is None or candidate.score > current.score:
+                    best[reference] = candidate
+
+    results = list(best.values())
+
+    # Weak partial matches add noise next to a confident match.
+    if any(item.confidence == "high" for item in results):
+        results = [item for item in results if item.confidence != "low"]
+
+    ranked = sorted(
+        results,
         key=lambda item: (
             -item.score,
             len(_quote_tokens(item.text)),
             item.reference,
-        )        
+        ),
     )
     return ranked[:limit]
-
 
 
 def find_passage_candidates(
@@ -348,12 +391,12 @@ def find_passage_candidates(
                 text=verse["text"],
                 score=1.0,
                 match_type="explicit",
+                confidence="high",
             )
         ]
 
-    # Otherwise search the installed translation for lexical matches.
-    # Search for a sufficiently strong ordered quotation.
-    # Paraphrase matching will be added as a separate stage.
+    # Otherwise look for an ordered quotation. Paraphrase matching will be
+    # added as a separate stage.
     return _match_ordered_quote(
         transcript,
         translation_code,

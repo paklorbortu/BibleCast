@@ -4,6 +4,53 @@ import re
 from biblecast.bible.database import get_verse
 
 
+_ORDINALS = {
+    "first": "1", "1st": "1",
+    "second": "2", "2nd": "2",
+    "third": "3", "3rd": "3",
+}
+
+# Spoken or common alternative names mapped to the stored book names.
+_BOOK_ALIASES = {
+    "psalm": "Psalms",
+    "psalms": "Psalms",
+    "song of songs": "Song of Solomon",
+    "songs of solomon": "Song of Solomon",
+    "canticles": "Song of Solomon",
+    "revelations": "Revelation",
+    "revelation of john": "Revelation",
+    "acts of the apostles": "Acts",
+    "philippian": "Philippians",
+    "ephesian": "Ephesians",
+    "colossian": "Colossians",
+    "galatian": "Galatians",
+}
+
+
+def canonical_book_name(name):
+    """Map a spoken or alternative book name to its stored form.
+
+    Examples: "Psalm" -> "Psalms", "first John" -> "1 John".
+    Unknown names are returned unchanged so exact names still work.
+    """
+    words = name.split()
+    if not words:
+        return name
+
+    prefix = ""
+    first = words[0].casefold().rstrip(".")
+    if len(words) > 1 and first in _ORDINALS:
+        prefix = _ORDINALS[first] + " "
+        words = words[1:]
+    elif len(words) > 1 and words[0] in {"1", "2", "3"}:
+        prefix = words[0] + " "
+        words = words[1:]
+
+    base = " ".join(words)
+    base = _BOOK_ALIASES.get(base.casefold(), base)
+    return (prefix + base).strip()
+
+
 REFERENCE_PATTERN = re.compile(
     r"""
     ^\s*
@@ -41,6 +88,7 @@ def parse_reference(reference):
 
     book = " ".join(match.group("book").split())
     book = re.sub(r"\s+chapter\s*$", "", book, flags=re.IGNORECASE)
+    book = canonical_book_name(book)
 
     chapter = int(match.group("chapter"))
     verse = int(match.group("verse"))
