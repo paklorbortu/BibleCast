@@ -31,10 +31,12 @@ class LiveAudioSession(QObject):
         translation_code: str,
         pipeline: AudioReferencePipeline | None = None,
         parent: QObject | None = None,
+        device: int | str | None = None,
     ) -> None:
         super().__init__(parent)
         self.translation_code = translation_code
         self.pipeline = pipeline or AudioReferencePipeline()
+        self.device = device
 
         self._queue: Queue[np.ndarray] = Queue(
             maxsize=self.QUEUE_CAPACITY
@@ -77,6 +79,7 @@ class LiveAudioSession(QObject):
         self._capture = MicrophoneCapture(
             on_segment=self._enqueue_segment,
             on_error=self._capture_error,
+            device=self.device,
         )
         self._inference_thread = Thread(
             target=self._inference_loop,

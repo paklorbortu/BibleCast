@@ -1,7 +1,11 @@
+from av.audio import layout
+from huggingface_hub.inference._generated.types import zero_shot_image_classification
 from huggingface_hub.inference._generated.types import zero_shot_image_classification
 import re
 import sys
+import sounddevice as sd
 
+from huggingface_hub.inference._generated.types import zero_shot_image_classification
 from biblecast.ai.live_audio_session import LiveAudioSession
 from PySide6.QtGui import QShortcut, QKeySequence
 from biblecast.ai.audio_reference_pipeline import AudioReferencePipeline
@@ -244,6 +248,14 @@ class BibleCastWindow(QMainWindow):
         self.stop_listening_button = QPushButton("Stop Listening")
         self.stop_listening_button.setEnabled(False)
 
+        # Audio input device selector
+        self.audio_device = QComboBox()
+        self.audio_device.setMinimumWidth(250)
+        self.audio_device.setToolTip(
+            "Select the microphone, audio interface, or mixer input."
+        )
+        self.populate_audio_devices()
+
         self.start_listening_button.clicked.connect(self.start_listening)
         self.stop_listening_button.clicked.connect(self.stop_listening)
 
@@ -335,6 +347,9 @@ class BibleCastWindow(QMainWindow):
         layout.addWidget(search_button)
         
         # Live microphone controls
+        layout.addWidget(QLabel("Audio input device"))
+        layout.addWidget(self.audio_device)
+
         listening_buttons = QHBoxLayout()
         listening_buttons.addWidget(self.start_listening_button)
         listening_buttons.addWidget(self.stop_listening_button)
@@ -394,6 +409,44 @@ class BibleCastWindow(QMainWindow):
                 "No translations installed",
                 None,
             )
+
+
+    def populate_audio_devices(self):
+        """List available audio input devices."""
+        self.audio_device.clear()
+
+        try:
+            devices = sd.query_devices()
+            default_device = sd.default.device[0]
+            default_index = (
+                int(default_device)
+                if default_device is not None and int(default_device) >= 0
+                else None
+            )
+
+            for index, device in enumerate(devices):
+                if int(device["max_input_channels"]) < 1:
+                    continue
+
+                name = str(device["name"])
+                label = f"{name} ({device['max_input_channels']} input channels)"
+
+                self.audio_device.addItem(label, index)
+
+                if index == default_index:
+                    self.audio_device.setCurrentIndex(
+                        self.audio_device.count() - 1
+                    )
+
+            if self.audio_device.count() == 0:
+                self.audio_device.addItem("No audio inputs found", None)
+
+        except Exception as exc:
+            self.audio_device.addItem("Could not enumerate audio inputs", None)
+            self.status.setText(
+                f"Could not list audio devices: {type(exc).__name__}: {exc}"
+            )
+
 
     def on_translation_changed(self):
         self.refresh_book_completer()
@@ -989,6 +1042,14 @@ class BibleCastWindow(QMainWindow):
         ):
             return
 
+        device = self.audio_device.currentData()
+
+        if device is None:
+            self.status.setText(
+                "Select an available audio input device first."
+            )
+            return
+
         translation_code = self.translation.currentData()
         if not translation_code:
             self.status.setText(
@@ -999,6 +1060,7 @@ class BibleCastWindow(QMainWindow):
         session = LiveAudioSession(
             translation_code=translation_code,
             parent=self,
+            device=device,
         )
         session.result_ready.connect(self.on_live_audio_result)
         session.error_occurred.connect(self.on_live_audio_error)
