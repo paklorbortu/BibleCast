@@ -124,3 +124,72 @@ def test_returns_no_candidates_for_empty_or_unrelated_input():
             "WEB",
             "   ",
         ) == []
+
+
+def test_rejects_single_common_word_as_quote():
+    with patch(
+        "biblecast.ai.passage_candidates.get_all_verses"
+    ) as get_all_verses:
+        candidates = find_passage_candidates(
+            "WEB",
+            "one",
+        )
+
+    assert candidates == []
+    get_all_verses.assert_not_called()
+
+
+def test_rejects_short_ambiguous_fragment():
+    verses = [
+        {
+            "book_name": "John",
+            "chapter": 10,
+            "verse": 30,
+            "text": "I and the Father are one.",
+        },
+    ]
+
+    with patch(
+        "biblecast.ai.passage_candidates.get_all_verses",
+        return_value=verses,
+    ):
+        candidates = find_passage_candidates(
+            "WEB",
+            "Father one",
+        )
+
+    assert candidates == []
+
+
+def test_matches_ordered_direct_quote():
+    verses = [
+        {
+            "book_name": "Psalm",
+            "chapter": 23,
+            "verse": 1,
+            "text": "Yahweh is my shepherd I shall lack nothing.",
+        },
+        {
+            "book_name": "John",
+            "chapter": 3,
+            "verse": 16,
+            "text": (
+                "For God so loved the world that he gave "
+                "his one and only Son."
+            ),
+        },
+    ]
+
+    with patch(
+        "biblecast.ai.passage_candidates.get_all_verses",
+        return_value=verses,
+    ):
+        candidates = find_passage_candidates(
+            "WEB",
+            "Yahweh is my shepherd",
+        )
+
+    assert candidates
+    assert candidates[0].reference == "Psalm 23:1"
+    assert candidates[0].match_type == "quote"
+    assert candidates[0].evidence == "yahweh is my shepherd"
